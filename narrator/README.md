@@ -1,6 +1,6 @@
 # Narrator
 
-Reading Claude Code's replies gets tiring. Narrator reads them to you instead: press **Control + Option + R** anywhere on your Mac and you hear Claude's latest reply, rewritten in plain everyday words, in a Mac voice or any ElevenLabs voice (including a clone of your own). Press it again to stop.
+Reading Claude Code's replies gets tiring. Narrator reads them to you instead: press **Control + Option + R** anywhere on your Mac and you hear Claude's latest reply, rewritten in plain everyday words, in a Mac voice or a clone of any voice (your own, say), made free on your Mac or with ElevenLabs. Press it again to stop.
 
 When you step away while Claude works, the screen dims and pulses so you notice from across the room: **orange** when Claude has finished, **blue** when it's waiting on you (a question, a plan to approve, a permission prompt). The summary is written the moment Claude finishes, so it starts speaking as soon as you press the keys.
 
@@ -8,7 +8,7 @@ When you step away while Claude works, the screen dims and pulses so you notice 
 
 - macOS, with Apple's command line tools (`xcode-select --install`), which provide `python3` and `swiftc`
 - Claude Code, signed in. Summaries are written by Haiku through your own `claude` login.
-- Optional: an [ElevenLabs](https://elevenlabs.io) account for cloned voices, and `brew install ffmpeg` so that voice starts playing while it streams
+- Optional, to clone a voice: either free on your Mac (Apple Silicon, `brew install uv`, about 3.5 GB of downloads once), or with an [ElevenLabs](https://elevenlabs.io) account (`brew install ffmpeg` so that voice starts playing while it streams)
 
 ## Install
 
@@ -26,6 +26,8 @@ Restart Claude Code, then run **`/narrator setup`**. It compiles two small helpe
 | `/narrator` | What's set now: voice, detail, flash, hotkey |
 | `/narrator read` / `stop` | Read the latest reply, or stop (same as the hotkey) |
 | `/narrator use <name>` | Switch to a saved ElevenLabs voice or any Mac voice, e.g. `use Daniel` |
+| `/narrator clone <name> <audio-file>` | Clone a voice on your Mac, free, from 10–15 seconds of speech |
+| `/narrator clone <name> <elevenlabs-voice>` | Make a free copy on your Mac of a saved ElevenLabs voice, used whenever ElevenLabs fails |
 | `/narrator add <name> <voice-id>` | Save an ElevenLabs voice under a name |
 | `/narrator detail short\|medium\|full` | How much of the reply the summary keeps (default `medium`: every point, one sentence each) |
 | `/narrator flash on\|off\|<seconds>` | Flash only after you've been away this many seconds (`0` = always) |
@@ -34,7 +36,17 @@ Restart Claude Code, then run **`/narrator setup`**. It compiles two small helpe
 
 Claude can also change these for you: just ask ("read in Daniel's voice", "only flash after two minutes").
 
-## Use your own voice (ElevenLabs)
+## Clone a voice on your Mac (free)
+
+```
+/narrator clone me ~/Downloads/my-voice.m4a
+```
+
+Give it 10–15 seconds of one person talking clearly, with no music or other voices (.m4a, .mp3 or .wav; only the first 15 seconds are used). The first clone installs [mlx-audio](https://github.com/Blaizzy/mlx-audio) and downloads [Chatterbox Turbo](https://huggingface.co/ResembleAI/chatterbox-turbo), about 3.5 GB, which takes a few minutes. After that it needs no internet and no account.
+
+Pressing the hotkey, the voice starts about 5 seconds later, then keeps ahead of itself sentence by sentence. When Claude finishes while you're away, the audio is made in advance, so it plays at once. Before an ElevenLabs subscription ends, copy its voices to your Mac: `/narrator clone me-local me` records a short sample of the saved ElevenLabs voice `me` (about 200 characters of credits) and clones it. From then on `me-local` reads instead of `me` whenever ElevenLabs fails, and `/narrator use me-local` switches to it for good.
+
+## Use a voice from ElevenLabs
 
 1. On elevenlabs.io: Voices → Add a new voice → Instant Voice Clone. Upload one to two minutes of clear speech (with that person's permission). [`recording-script.txt`](recording-script.txt) is a 90-second script written to sound like Claude's replies. Copy the voice ID.
 2. Create an API key (Developers → API Keys, with text-to-speech access) and save it in your Keychain. Run this in your own Terminal; it asks for the key twice, hidden:
@@ -56,6 +68,7 @@ The commands above write `~/.claude/voice_claude/config.json`. A few more keys c
 | `model` | `haiku` | Model that writes the summary |
 | `summarize` | `true` | `false` reads the whole reply word for word |
 | `prefetch` | `true` | Write the summary as soon as Claude finishes (one Haiku call per reply) |
+| `local_model` | `mlx-community/chatterbox-turbo-fp16` | Model for voices cloned on your Mac. `mlx-community/chatterbox-turbo-4bit` is a smaller download (0.4 GB instead of 3 GB) |
 | `elevenlabs_model` | `eleven_flash_v2` | Fastest. `eleven_flash_v2_5` for other languages, `eleven_multilingual_v2` for a richer, slower voice |
 
 ## How it works

@@ -8,4 +8,4 @@ claude plugin marketplace add prathamhpatel/claude-plugins-by-pratham
 
 | Plugin | What it does | Install |
 |---|---|---|
-| [narrator](narrator) | Hear Claude's replies as a short spoken summary in any voice, including a clone of your own (Control+Option+R, macOS). The screen pulses orange when a task finishes and blue when Claude needs you, while you're away. | `claude plugin install narrator@pratham-plugins` |
+| [narrator](narrator) | Hear Claude's replies as a short spoken summary in any voice, including a clone of your own, made free on your Mac or with ElevenLabs (Control+Option+R, macOS). The screen pulses orange when a task finishes and blue when Claude needs you, while you're away. | `claude plugin install narrator@pratham-plugins` |

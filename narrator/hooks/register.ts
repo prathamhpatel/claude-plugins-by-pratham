@@ -16,7 +16,7 @@ export const register: Register = (on) => {
     await $.command.register({
       name: 'narrator',
       description: 'Narrator: hear replies in a chosen voice with Control+Option+R',
-      argumentHint: 'status | read | stop | use <name> | add <name> <voice-id> | detail short|medium|full | flash on|off|<seconds> | test | setup | uninstall',
+      argumentHint: 'status | read | stop | use <name> | add <name> <voice-id> | clone <name> <audio-file|voice> | detail short|medium|full | flash on|off|<seconds> | test | setup | uninstall',
     })
 
     return next(e)
@@ -60,7 +60,8 @@ export const register: Register = (on) => {
       }
       const argv = [PYTHON, `${$.plugin.root}/voice_claude.py`, action, ...args]
       if (action === 'read') argv.push('--detach')
-      const { stdout, stderr } = await $.process.run(argv, { timeoutMs: 60_000 })
+      // A first clone installs the cloning tools and downloads the model: minutes, once.
+      const { stdout, stderr } = await $.process.run(argv, { timeoutMs: action === 'clone' ? 1_800_000 : 60_000 })
 
       return { text: (stdout || stderr).trim() || 'Done.' }
     } catch (error) {

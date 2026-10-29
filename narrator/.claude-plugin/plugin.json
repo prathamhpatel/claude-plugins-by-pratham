@@ -1,6 +1,6 @@
 {
   "name": "narrator",
-  "version": "0.1.2",
+  "version": "0.2.1",
   "description": "Hear Claude's replies as a short spoken summary in any voice (Control+Option+R), with a screen flash when a task finishes while you're away. /narrator to configure.",
   "author": {
     "name": "Pratham Patel"

@@ -6,6 +6,8 @@
   voice_claude.py status                   show the voice, saved voices, flash and hotkey
   voice_claude.py use <name>               switch to a saved voice or any Mac voice
   voice_claude.py add <name> <voice-id>    save an ElevenLabs voice under a name
+  voice_claude.py clone <name> <audio>     clone a voice on this Mac from 10-15 seconds of speech,
+                                           or from a saved ElevenLabs voice: clone <name> <its name>
   voice_claude.py flash on|off|<seconds>   flash after replies when away this long
   voice_claude.py detail short|medium|full how much of the reply the summary keeps
   voice_claude.py preview                  print the reply and its summary without speaking
@@ -22,6 +24,7 @@ import signal
 import subprocess
 import sys
 import time
+import wave
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,10 +38,14 @@ CACHE_FILE = STATE / "last_summary.json"
 CONFIG_FILE = STATE / "config.json"
 LOG_FILE = STATE / "voice_claude.log"
 FLASH_BIN = STATE / "voice-claude-flash"
+VOICES_DIR = STATE / "voices"
+TTS_ENV = STATE / "tts-env"  # Python environment for the voice cloned on this Mac
+TTS_PYTHON = TTS_ENV / "bin" / "python"
+LOCAL_TTS = Path(__file__).resolve().parent / "local_tts.py"
 KEYCHAIN_SERVICE = "voice-claude-elevenlabs"
 
 DEFAULTS = {
-    "engine": "say",  # "say" (Mac voices) or "elevenlabs" (cloned voice)
+    "engine": "say",  # "say" (Mac voices), "elevenlabs" (cloned voice online) or "local" (cloned on this Mac)
     "voice": "Samantha",
     "rate": 185,
     "model": "haiku",
@@ -50,9 +57,17 @@ DEFAULTS = {
     "elevenlabs_voice_id": "",
     "elevenlabs_model": "eleven_flash_v2",
     "voices": {},  # saved ElevenLabs voices by name, e.g. {"me": "<voice id>"}
+    "local_voice": "",  # the voice cloned on this Mac in use, also the fallback when ElevenLabs fails
+    "local_voices": {},  # voices cloned on this Mac by name, e.g. {"me": "<path to its clip>"}
+    "backups": {},  # ElevenLabs voice -> its copy on this Mac, used when ElevenLabs fails
+    "local_model": "mlx-community/chatterbox-turbo-fp16",
 }
 MAX_INPUT_CHARS = 12000
 START_SOUND = "/System/Library/Sounds/Tink.aiff"
+TEST_LINE = "Hi! This is the voice I'll use to read Claude's replies to you."
+SAMPLE_LINE = ("Okay, so here's what happened. I fixed the login page, and now it loads a lot faster. "
+               "All the tests pass, which is great. There's one small thing you'll want to check "
+               "before you ship it, though.")  # what an ElevenLabs voice says to be cloned on this Mac
 DETACHED = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL, "start_new_session": True}
 
@@ -81,7 +96,7 @@ def load_config():
         saved = json.loads(CONFIG_FILE.read_text())
     except (OSError, ValueError):
         saved = {}
-    return {**DEFAULTS, "voices": {}, **saved}
+    return {**DEFAULTS, "voices": {}, "local_voices": {}, "backups": {}, **saved}
 
 
 def save_config(cfg):
@@ -173,6 +188,16 @@ def elevenlabs_key():
     return found.stdout.strip()
 
 
+def elevenlabs_speech(voice_id, model, text, key):
+    """The streamed mp3 of `text` in an ElevenLabs voice."""
+    request = urllib.request.Request(
+        f"https://api.elevenlabs.io/v1/text-to-speech/{urllib.parse.quote(voice_id, safe='')}/stream"
+        "?output_format=mp3_44100_128",
+        data=json.dumps({"text": text, "model_id": model}).encode(),
+        headers={"xi-api-key": key, "Content-Type": "application/json", "Accept": "audio/mpeg"})
+    return urllib.request.urlopen(request, timeout=30)
+
+
 def play_elevenlabs(text, cfg):
     """Speak `text` in the ElevenLabs voice, playing it as it streams in. False if it can't."""
     global child
@@ -186,13 +211,8 @@ def play_elevenlabs(text, cfg):
         child = subprocess.Popen(["afplay", str(audio_file)])
         child.wait()
         return True
-    request = urllib.request.Request(
-        f"https://api.elevenlabs.io/v1/text-to-speech/{urllib.parse.quote(voice_id, safe='')}/stream"
-        "?output_format=mp3_44100_128",
-        data=json.dumps({"text": text, "model_id": cfg["elevenlabs_model"]}).encode(),
-        headers={"xi-api-key": key, "Content-Type": "application/json", "Accept": "audio/mpeg"})
     try:
-        response = urllib.request.urlopen(request, timeout=30)
+        response = elevenlabs_speech(voice_id, cfg["elevenlabs_model"], text, key)
     except urllib.error.HTTPError as e:
         log(f"elevenlabs: HTTP {e.code} {e.read()[:300]!r}")
         return False
@@ -224,9 +244,61 @@ def play_elevenlabs(text, cfg):
     return True
 
 
+def local_audio_file(text, cfg):
+    clip = cfg["local_voices"].get(cfg["local_voice"], "")
+    digest = hashlib.sha1(f"{clip}\n{cfg['local_model']}\n{text}".encode()).hexdigest()
+    return STATE / f"audio-{digest[:16]}.wav"
+
+
+def stop_maker(lock):
+    """Stop the turn-end hook if it is still making this audio: speaking it now is quicker."""
+    try:
+        os.kill(int(lock.read_text()), signal.SIGTERM)
+    except (OSError, ValueError):
+        pass
+
+
+def local_voice(text, cfg, play):
+    """Say `text` in the voice cloned on this Mac, or with play=False only make it for later.
+    False if it can't."""
+    global child
+    clip = cfg["local_voices"].get(cfg["local_voice"])
+    if not clip or not TTS_PYTHON.exists():
+        log("local voice: none cloned yet, using the Mac voice")
+        return False
+    audio_file = local_audio_file(text, cfg)
+    lock = audio_file.with_suffix(".lock")
+    if play:
+        stop_maker(lock)
+    if audio_file.exists():
+        if play:
+            child = subprocess.Popen(["afplay", str(audio_file)])
+            child.wait()
+        return True
+    for old in STATE.glob("audio-*.wav"):
+        old.unlink()
+    child = subprocess.Popen(
+        [str(TTS_PYTHON), str(LOCAL_TTS), "--ref", clip, "--out", str(audio_file),
+         "--model", cfg["local_model"], *(["--play"] if play else [])],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    lock.write_text(str(child.pid))
+    try:
+        _, err = child.communicate(text)
+    finally:
+        if lock.exists() and lock.read_text() == str(child.pid):
+            lock.unlink()
+    if child.returncode != 0:
+        log(f"local voice: {err.strip()[-300:]!r}")
+        return False
+    return True
+
+
 def speak(text, cfg):
     global child
     if cfg["engine"] == "elevenlabs" and play_elevenlabs(text, cfg):
+        return
+    # The voice cloned on this Mac, also when ElevenLabs fails (say the subscription ended).
+    if (cfg["engine"] == "local" or cfg["local_voice"]) and local_voice(text, cfg, play=True):
         return
     child = subprocess.Popen(["say", "-v", cfg["voice"], "-r", str(cfg["rate"]), text])
     child.wait()
@@ -282,7 +354,7 @@ def preview():
 
 
 def test():
-    speak("Hi! This is the voice I'll use to read Claude's replies to you.", load_config())
+    speak(TEST_LINE, load_config())
 
 
 def idle_seconds():
@@ -322,7 +394,10 @@ def prepare():
     path = Path(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2] else latest_transcript()
     reply = last_reply(path) if path and path.exists() else ""
     if reply:
-        spoken_text(reply, load_config())
+        cfg = load_config()
+        text = spoken_text(reply, cfg)
+        if cfg["engine"] == "local":
+            local_voice(text, cfg, play=False)
 
 
 def read_detached():
@@ -348,6 +423,10 @@ def status():
     if cfg["engine"] == "elevenlabs":
         current = names.get(cfg["elevenlabs_voice_id"], cfg["elevenlabs_voice_id"] or "no voice ID set")
         voice = f"{current} (ElevenLabs, {cfg['elevenlabs_model']})"
+        if cfg["local_voice"]:
+            voice += f", or {cfg['local_voice']} on this Mac when ElevenLabs fails"
+    elif cfg["engine"] == "local":
+        voice = f"{cfg['local_voice']} (cloned on this Mac)"
     else:
         voice = f"{cfg['voice']} (Mac voice)"
     if not cfg["flash"]:
@@ -359,7 +438,8 @@ def status():
     helper = subprocess.run(["pgrep", "-f", "voice-claude-hotkey"], capture_output=True)
     hotkey = "Control+Option+R" if helper.returncode == 0 else "not running (run /narrator setup)"
     detail = cfg["detail"] if cfg["summarize"] else "whole reply, no summary"
-    print(f"Voice: {voice}\nSaved voices: {', '.join(cfg['voices']) or 'none'}\n"
+    saved = [*cfg["voices"], *(f"{name} (on this Mac)" for name in cfg["local_voices"])]
+    print(f"Voice: {voice}\nSaved voices: {', '.join(saved) or 'none'}\n"
           f"Detail: {detail}\nScreen flash: {flash}\nHotkey: {hotkey}")
 
 
@@ -369,14 +449,17 @@ def use(args):
     mac = {v.lower(): v for v in mac_voices()}
     by_first_word = {v.split(" (")[0].lower(): v for v in mac.values()}
     if name in cfg["voices"]:
-        cfg.update(engine="elevenlabs", elevenlabs_voice_id=cfg["voices"][name])
+        cfg.update(engine="elevenlabs", elevenlabs_voice_id=cfg["voices"][name],
+                   local_voice=cfg["backups"].get(name, ""))
+    elif name in cfg["local_voices"]:
+        cfg.update(engine="local", local_voice=name)
     elif name.lower() in mac or name.lower() in by_first_word:
         cfg.update(engine="say", voice=mac.get(name.lower()) or by_first_word[name.lower()])
     else:
-        saved = ", ".join(cfg["voices"]) or "none yet"
+        saved = ", ".join([*cfg["voices"], *cfg["local_voices"]]) or "none yet"
         sys.exit(f"No voice called '{name}'. Saved voices: {saved}. Mac voices: say -v '?'")
     save_config(cfg)
-    print(f"Now reading in {name}'s voice." if cfg["engine"] == "elevenlabs" else f"Now reading with the Mac voice {cfg['voice']}.")
+    print(f"Now reading with the Mac voice {cfg['voice']}." if cfg["engine"] == "say" else f"Now reading in {name}'s voice.")
 
 
 def add(args):
@@ -387,6 +470,60 @@ def add(args):
     cfg["voices"][name] = voice_id
     save_config(cfg)
     print(f"Saved '{name}'. Switch to it with: use {name}")
+
+
+def clone(args):
+    if len(args) != 2:
+        sys.exit("Usage: clone <name> <audio file with 10-15 seconds of one person speaking clearly, "
+                 "or the name of a saved ElevenLabs voice>")
+    name, source = args
+    cfg = load_config()
+    VOICES_DIR.mkdir(parents=True, exist_ok=True)
+    from_elevenlabs = source in cfg["voices"]
+    if from_elevenlabs:  # record a sample of it to clone, about 200 characters of credits
+        sample = VOICES_DIR / f"{name}-sample.mp3"
+        try:
+            with elevenlabs_speech(cfg["voices"][source], "eleven_multilingual_v2", SAMPLE_LINE, elevenlabs_key()) as r:
+                sample.write_bytes(r.read())
+        except OSError as e:
+            sys.exit(f"Couldn't get a sample of {source} from ElevenLabs: {e}")
+        audio = sample
+    else:
+        audio = Path(source).expanduser()
+        if not audio.is_file():
+            sys.exit(f"No audio file at {audio}")
+    if not TTS_PYTHON.exists():
+        uv = shutil.which("uv") or "/opt/homebrew/bin/uv"
+        if not Path(uv).exists():
+            sys.exit("Cloning on this Mac needs uv first: brew install uv")
+        print("Installing the voice cloning tools, one time...", flush=True)
+        subprocess.run([uv, "venv", "--quiet", "--python", "3.12", str(TTS_ENV)], check=True)
+        subprocess.run([uv, "pip", "install", "--quiet", "--python", str(TTS_PYTHON), "mlx-audio"], check=True)
+    clip = VOICES_DIR / f"{name}.wav"
+    converted = subprocess.run(["afconvert", "-f", "WAVE", "-d", "LEI16@24000", "-c", "1", str(audio), str(clip)],
+                               capture_output=True, text=True)
+    if converted.returncode != 0:
+        sys.exit(f"Couldn't read {audio.name}; save it as .m4a, .mp3 or .wav and try again.")
+    with wave.open(str(clip)) as w:  # the model listens to the first 15 seconds at most
+        params, frames = w.getparams(), w.readframes(w.getframerate() * 15)
+    with wave.open(str(clip), "wb") as w:
+        w.setparams(params)
+        w.writeframes(frames)
+    cfg["local_voices"][name] = str(clip)
+    print("Making a first line in the new voice (the first time downloads the model, about 3 GB)...", flush=True)
+    if not local_voice(TEST_LINE, {**cfg, "local_voice": name}, play=False):  # so `test` plays at once
+        sys.exit(f"Cloning failed; the reason is in {LOG_FILE}")
+    if from_elevenlabs:  # a backup: keep the voice in use, and step in when ElevenLabs fails
+        cfg["backups"][source] = name
+        if cfg["engine"] == "elevenlabs" and cfg["elevenlabs_voice_id"] == cfg["voices"][source]:
+            cfg["local_voice"] = name
+        save_config(cfg)
+        print(f"Saved {name}, a copy of {source} made on this Mac. It reads instead of {source} "
+              f"whenever ElevenLabs fails. Switch to it with: use {name}")
+    else:
+        cfg.update(engine="local", local_voice=name)
+        save_config(cfg)
+        print(f"Now reading in {name}'s voice, made on this Mac. Hear it with: test")
 
 
 def flash_setting(args):
@@ -428,6 +565,7 @@ def main():
         "status": status,
         "use": lambda: use(args),
         "add": lambda: add(args),
+        "clone": lambda: clone(args),
         "flash": lambda: flash_setting(args),
         "detail": lambda: detail_setting(args),
         "preview": preview,

@@ -11,7 +11,7 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 PYTHON="/usr/bin/python3"
 
 mkdir -p "$DEST" "$HOME/Library/LaunchAgents"
-cp "$SRC/voice_claude.py" "$DEST/voice_claude.py"
+cp "$SRC/voice_claude.py" "$SRC/local_tts.py" "$DEST/"
 [ -f "$DEST/config.json" ] || cat > "$DEST/config.json" <<'JSON'
 {
   "engine": "say",

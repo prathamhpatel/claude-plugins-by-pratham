@@ -1,0 +1,14 @@
+{
+  "name": "pratham-plugins",
+  "owner": {
+    "name": "Pratham Patel"
+  },
+  "description": "Claude Code plugins by Pratham Patel",
+  "plugins": [
+    {
+      "name": "narrator",
+      "source": "./narrator",
+      "description": "Hear Claude's replies as a short spoken summary in any voice (Control+Option+R); the screen pulses orange when a task finishes and blue when Claude needs you, while you're away. /narrator to configure."
+    }
+  ]
+}
